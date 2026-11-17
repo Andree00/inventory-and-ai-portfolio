@@ -39,6 +39,9 @@ func TestInventoryWorkflow(t *testing.T) {
 	if err = migrateDocuments(); err != nil {
 		t.Fatal(err)
 	}
+	if err = migrateParties(); err != nil {
+		t.Fatal(err)
+	}
 	call := func(fn func(http.ResponseWriter, *http.Request) error, method string, body any, want int) {
 		t.Helper()
 		data, _ := json.Marshal(body)
@@ -50,6 +53,15 @@ func TestInventoryWorkflow(t *testing.T) {
 		}
 	}
 	call(lookup("brands"), "POST", M{"name": "Brand"}, 200)
+	call(parties("customers"), "POST", M{"name": "Example customer", "phone": "123"}, 200)
+	call(parties("vendors"), "POST", M{"name": "Example vendor"}, 200)
+	call(parties("vendors"), "PUT", M{"id": 1, "name": "Updated vendor", "email": "vendor@example.test"}, 200)
+	call(parties("vendors"), "POST", M{"name": "Updated vendor"}, 400)
+	rec := httptest.NewRecorder()
+	handler(searchOptions)(rec, httptest.NewRequest("GET", "/?resource=vendors&q=Updated", nil))
+	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("Updated vendor")) {
+		t.Fatalf("vendor search: %d %s", rec.Code, rec.Body.String())
+	}
 	call(lookup("categories"), "POST", M{"name": "Category"}, 200)
 	call(items, "POST", M{"sku": "TEST-1", "name": "Test item", "brand_id": 1, "category_id": 1, "unit": "pcs", "reorder_level": 2}, 200)
 	call(requests, "POST", M{"item_id": 1, "quantity": 10, "estimated_cost": 100, "reason": "Initial stock"}, 200)

@@ -59,4 +59,4 @@ app.post('/api/ask',wrap(async(req,res)=>{
  res.json({answer:result.message.content,sources:matches.map((m,i)=>({number:i+1,name:m.name,page:m.page,excerpt:m.content,score:Math.round(m.score*100)}))});
 }));
 app.use((err,req,res,next)=>{console.error(err.message);res.status(err.status||400).json({error:err.message||'Request failed.'});});
-const port=Number(process.env.PORT||3000);app.listen(port,()=>console.log(`AI Document Summarizer running at http://localhost:${port}`));
+const port=Number(process.env.PORT||3000);app.listen(port,'127.0.0.1',()=>console.log(`AI Document Summarizer running at http://localhost:${port}`));

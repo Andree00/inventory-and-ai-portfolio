@@ -52,7 +52,7 @@ type documentInput struct {
 
 func documents(w http.ResponseWriter, r *http.Request) error {
 	if r.Method == "GET" {
-		heads, e := rows(`SELECT h.*,COUNT(l.id) line_count,COALESCE(SUM(l.quantity*l.unit_price),0) total FROM document_headers h LEFT JOIN document_lines l ON l.document_id=h.id GROUP BY h.id ORDER BY h.id DESC LIMIT 300`)
+		heads, e := rows(`SELECT h.*,COUNT(l.id) line_count,COALESCE(SUM(l.quantity*l.unit_price),0) total FROM document_headers h LEFT JOIN document_lines l ON l.document_id=h.id GROUP BY h.id ORDER BY h.id DESC LIMIT 2000`)
 		if e != nil {
 			return e
 		}

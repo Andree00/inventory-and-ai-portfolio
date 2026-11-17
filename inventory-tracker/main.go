@@ -153,11 +153,17 @@ func main() {
 	if e = migrateDocuments(); e != nil {
 		log.Fatal(e)
 	}
+	if e = migrateParties(); e != nil {
+		log.Fatal(e)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/overview", handler(overview))
 	mux.HandleFunc("/api/items", handler(items))
 	mux.HandleFunc("/api/brands", handler(lookup("brands")))
 	mux.HandleFunc("/api/categories", handler(lookup("categories")))
+	mux.HandleFunc("/api/customers", handler(parties("customers")))
+	mux.HandleFunc("/api/vendors", handler(parties("vendors")))
+	mux.HandleFunc("/api/search", handler(searchOptions))
 	mux.HandleFunc("/api/requests", handler(requests))
 	mux.HandleFunc("/api/requests/decision", handler(decision))
 	mux.HandleFunc("/api/orders", handler(orders))
