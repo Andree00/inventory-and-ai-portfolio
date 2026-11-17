@@ -150,6 +150,9 @@ func main() {
 	if e = migrate(); e != nil {
 		log.Fatal(e)
 	}
+	if e = migrateDocuments(); e != nil {
+		log.Fatal(e)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/overview", handler(overview))
 	mux.HandleFunc("/api/items", handler(items))
@@ -167,6 +170,9 @@ func main() {
 	mux.HandleFunc("/api/recalculate", handler(recalculate))
 	mux.HandleFunc("/api/monthly", handler(monthly))
 	mux.HandleFunc("/api/period", handler(period))
+	mux.HandleFunc("/api/documents", handler(documents))
+	mux.HandleFunc("/api/documents/decision", handler(documentDecision))
+	mux.HandleFunc("/api/top-items", handler(topItems))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -286,10 +292,11 @@ func items(w http.ResponseWriter, r *http.Request) error {
 		respond(w, x)
 		return nil
 	}
-	if e := method(r, "POST"); e != nil {
-		return e
+	if r.Method != "POST" && r.Method != "PUT" {
+		return appError{405, "Method not allowed."}
 	}
 	var b struct {
+		ID         int64   `json:"id"`
 		SKU        string  `json:"sku"`
 		Name       string  `json:"name"`
 		BrandID    int     `json:"brand_id"`
@@ -314,7 +321,21 @@ func items(w http.ResponseWriter, r *http.Request) error {
 	if _, e = lockPeriod(tx, true); e != nil {
 		return e
 	}
-	_, e = tx.Exec("INSERT INTO items(sku,name,brand_id,category_id,unit,reorder_level) VALUES(?,?,?,?,?,?)", b.SKU, b.Name, b.BrandID, b.CategoryID, b.Unit, b.Reorder)
+	if r.Method == "PUT" {
+		if b.ID < 1 {
+			return bad("A valid item ID is required.")
+		}
+		var exists int
+		if e = tx.QueryRow("SELECT COUNT(*) FROM items WHERE id=?", b.ID).Scan(&exists); e != nil {
+			return e
+		}
+		if exists == 0 {
+			return bad("Item not found.")
+		}
+		_, e = tx.Exec("UPDATE items SET sku=?,name=?,brand_id=?,category_id=?,unit=?,reorder_level=? WHERE id=?", b.SKU, b.Name, b.BrandID, b.CategoryID, b.Unit, b.Reorder, b.ID)
+	} else {
+		_, e = tx.Exec("INSERT INTO items(sku,name,brand_id,category_id,unit,reorder_level) VALUES(?,?,?,?,?,?)", b.SKU, b.Name, b.BrandID, b.CategoryID, b.Unit, b.Reorder)
+	}
 	if e != nil {
 		return bad("Could not create item. Check SKU and master data.")
 	}
@@ -577,7 +598,20 @@ func history(w http.ResponseWriter, r *http.Request) error {
 	if e := method(r, "GET"); e != nil {
 		return e
 	}
-	x, e := rows(`SELECT id,entity_type,entity_id,action,before_data,after_data,created_at FROM transaction_history ORDER BY id DESC LIMIT 200`)
+	before := int64(9223372036854775807)
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		v, e := strconv.ParseInt(raw, 10, 64)
+		if e != nil || v < 1 {
+			return bad("Invalid history cursor.")
+		}
+		before = v
+	}
+	term := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(term) > 100 {
+		return bad("Search text is too long.")
+	}
+	pattern := "%" + term + "%"
+	x, e := rows(`SELECT id,entity_type,entity_id,action,before_data,after_data,created_at FROM transaction_history WHERE id<? AND (?='' OR entity_type LIKE ? OR action LIKE ? OR CAST(entity_id AS CHAR) LIKE ? OR CAST(before_data AS CHAR) LIKE ? OR CAST(after_data AS CHAR) LIKE ?) ORDER BY id DESC LIMIT 100`, before, term, pattern, pattern, pattern, pattern, pattern)
 	if e != nil {
 		return e
 	}
