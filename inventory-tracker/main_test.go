@@ -39,6 +39,9 @@ func TestInventoryWorkflow(t *testing.T) {
 	if err = migrateDocuments(); err != nil {
 		t.Fatal(err)
 	}
+	if err = migrateTransactionActions(); err != nil {
+		t.Fatal(err)
+	}
 	if err = migrateParties(); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +72,10 @@ func TestInventoryWorkflow(t *testing.T) {
 	call(decision, "POST", M{"id": 1, "decision": "approved"}, 200)
 	call(orders, "POST", M{"request_id": 1, "supplier": "Supplier"}, 200)
 	call(receipts, "POST", M{"order_id": 1, "quantity": 6}, 200)
+	var eventBefore, eventAfter, eventChange float64
+	if err = db.QueryRow(`SELECT stock_before,stock_after,quantity_change FROM item_stock_events WHERE movement_id=1 AND action='POST'`).Scan(&eventBefore, &eventAfter, &eventChange); err != nil || eventBefore != 0 || eventAfter != 6 || eventChange != 6 {
+		t.Fatalf("receipt event: %v %v %v %v", eventBefore, eventAfter, eventChange, err)
+	}
 	call(receipts, "POST", M{"order_id": 1, "quantity": 5}, 400)
 	call(receipts, "POST", M{"order_id": 1, "quantity": 4}, 200)
 	call(requests, "POST", M{"item_id": 1, "quantity": 10, "estimated_cost": 120, "reason": "Replenishment"}, 200)
@@ -158,7 +165,104 @@ func TestInventoryWorkflow(t *testing.T) {
 		t.Fatal("failed document changed stock")
 	}
 	call(documents, "POST", M{"kind": "SALE", "reference_id": 0, "party": "Buyer", "note": "", "lines": []M{{"item_id": 1, "quantity": 1, "unit_price": 150, "source_id": 0}, {"item_id": 2, "quantity": 2, "unit_price": 90, "source_id": 0}}}, 200)
+	var gr, saleDoc int64
+	if err = db.QueryRow(`SELECT id FROM document_headers WHERE kind='GR'`).Scan(&gr); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT id FROM document_headers WHERE kind='SALE'`).Scan(&saleDoc); err != nil {
+		t.Fatal(err)
+	}
+	call(unpostDocument, "POST", M{"id": gr}, 400)                                                                                                                                                                     // later sale must be unposted first
+	call(editDocument, "POST", M{"id": po, "party": "Supplier", "note": "", "lines": []M{{"id": l1, "item_id": 1, "quantity": 4, "unit_price": 100}, {"id": l2, "item_id": 2, "quantity": 3, "unit_price": 50}}}, 400) // receipt exists
+	call(unpostDocument, "POST", M{"id": saleDoc}, 200)
+	call(unpostDocument, "POST", M{"id": saleDoc}, 400)
+	revenueResponse := httptest.NewRecorder()
+	handler(overview)(revenueResponse, httptest.NewRequest("GET", "/", nil))
+	var overviewData map[string]any
+	if err = json.Unmarshal(revenueResponse.Body.Bytes(), &overviewData); err != nil {
+		t.Fatal(err)
+	}
+	if overviewData["revenue"] != "750.00000000" {
+		t.Fatalf("unposted sale still affects revenue: %v", overviewData["revenue"])
+	}
+	if err = db.QueryRow(`SELECT quantity FROM items WHERE id=2`).Scan(&after); err != nil || after != 3 {
+		t.Fatalf("unposting sale did not restore stock: %v %v", after, err)
+	}
+	call(unpostDocument, "POST", M{"id": gr}, 200)
+	if err = db.QueryRow(`SELECT quantity FROM items WHERE id=2`).Scan(&after); err != nil || after != 0 {
+		t.Fatalf("unposting receipt did not reverse stock: %v %v", after, err)
+	}
+	var status string
+	if err = db.QueryRow(`SELECT status FROM document_headers WHERE id=?`, po).Scan(&status); err != nil || status != "open" {
+		t.Fatalf("order did not reopen: %v %v", status, err)
+	}
+	call(unpostDocument, "POST", M{"id": po}, 200)
+	call(editDocument, "POST", M{"id": po, "party": "New supplier", "note": "Updated", "lines": []M{{"id": l1, "item_id": 1, "quantity": 4, "unit_price": 105}, {"id": l2, "item_id": 2, "quantity": 3, "unit_price": 55}}}, 200)
+	if err = db.QueryRow(`SELECT status FROM document_headers WHERE id=?`, po).Scan(&status); err != nil || status != "unposted" {
+		t.Fatalf("editing should not post an order: %v %v", status, err)
+	}
+	call(postDocument, "POST", M{"id": po}, 200)
+	call(postDocument, "POST", M{"id": po}, 400)
+	if err = db.QueryRow(`SELECT COUNT(*) FROM transaction_history WHERE action='UNPOST' AND entity_type='movements'`).Scan(&count); err != nil || count < 4 {
+		t.Fatalf("unpost history missing: %v %v", count, err)
+	}
+	call(unpostLegacyTransaction, "POST", M{"kind": "MOVEMENT", "id": 1}, 400) // closed-period movement
+	call(editLegacyTransaction, "POST", M{"kind": "PR", "id": 1, "item_id": 1, "quantity": 10, "unit_cost": 100, "note": "Past", "party": ""}, 400)
+	call(requests, "POST", M{"item_id": 2, "quantity": 5, "estimated_cost": 50, "reason": "Legacy request"}, 200)
+	var legacyRequest int64
+	if err = db.QueryRow(`SELECT MAX(id) FROM purchase_requests`).Scan(&legacyRequest); err != nil {
+		t.Fatal(err)
+	}
+	legacyEdit := M{"kind": "PR", "id": legacyRequest, "item_id": 2, "quantity": 6, "unit_cost": 55, "note": "Updated request", "party": ""}
+	call(editLegacyTransaction, "POST", legacyEdit, 200)
+	call(unpostLegacyTransaction, "POST", M{"kind": "PR", "id": legacyRequest}, 200)
+	call(editLegacyTransaction, "POST", legacyEdit, 200)
+	call(postLegacyTransaction, "POST", M{"kind": "PR", "id": legacyRequest}, 200)
+	call(decision, "POST", M{"id": legacyRequest, "decision": "approved"}, 200)
+	call(orders, "POST", M{"request_id": legacyRequest, "supplier": "Supplier"}, 200)
+	var legacyOrder int64
+	if err = db.QueryRow(`SELECT MAX(id) FROM purchase_orders`).Scan(&legacyOrder); err != nil {
+		t.Fatal(err)
+	}
+	orderEdit := M{"kind": "PO", "id": legacyOrder, "item_id": 2, "quantity": 6, "unit_cost": 60, "note": "", "party": "Supplier"}
+	call(editLegacyTransaction, "POST", orderEdit, 200)
+	call(unpostLegacyTransaction, "POST", M{"kind": "PO", "id": legacyOrder}, 200)
+	call(editLegacyTransaction, "POST", orderEdit, 200)
+	call(postLegacyTransaction, "POST", M{"kind": "PO", "id": legacyOrder}, 200)
+	call(receipts, "POST", M{"order_id": legacyOrder, "quantity": 2}, 200)
+	var receiptID int64
+	if err = db.QueryRow(`SELECT MAX(id) FROM movements`).Scan(&receiptID); err != nil {
+		t.Fatal(err)
+	}
+	call(issues, "POST", M{"item_id": 2, "quantity": 1, "unit_price": 0, "note": "Office"}, 200)
+	var issueID int64
+	if err = db.QueryRow(`SELECT MAX(id) FROM movements`).Scan(&issueID); err != nil {
+		t.Fatal(err)
+	}
+	call(unpostLegacyTransaction, "POST", M{"kind": "MOVEMENT", "id": receiptID}, 400)
+	call(unpostLegacyTransaction, "POST", M{"kind": "MOVEMENT", "id": issueID}, 200)
+	if err = db.QueryRow(`SELECT stock_before,stock_after,quantity_change FROM item_stock_events WHERE movement_id=? AND action='UNPOST'`, issueID).Scan(&eventBefore, &eventAfter, &eventChange); err != nil || eventChange != 1 || eventAfter != eventBefore+1 {
+		t.Fatalf("issue reversal event: %v %v %v %v", eventBefore, eventAfter, eventChange, err)
+	}
+	call(itemLedger, "GET", nil, 200)
+	call(unpostLegacyTransaction, "POST", M{"kind": "MOVEMENT", "id": receiptID}, 200)
+	if err = db.QueryRow(`SELECT quantity FROM items WHERE id=2`).Scan(&after); err != nil || after != 0 {
+		t.Fatalf("legacy unpost stock: %v %v", after, err)
+	}
 	call(documents, "GET", nil, 200)
 	call(topItems, "GET", nil, 200)
+	call(getInsights, "GET", nil, 200)
+	mockModel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			t.Errorf("unexpected Ollama path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":"Inventory summary."}`))
+	}))
+	defer mockModel.Close()
+	t.Setenv("OLLAMA_URL", mockModel.URL)
+	call(explainInsights, "POST", M{"kind": "daily"}, 200)
+	call(explainInsights, "POST", M{"kind": "restock"}, 200)
+	call(explainInsights, "POST", M{"kind": "other"}, 400)
 	call(recalculate, "POST", M{}, 200)
 }

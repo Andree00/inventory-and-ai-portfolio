@@ -135,7 +135,10 @@ func period(w http.ResponseWriter, r *http.Request) error {
 func main() {
 	dsn := os.Getenv("MYSQL_DSN")
 	if dsn == "" {
-		dsn = "inventory:local_inventory_password@tcp(127.0.0.1:3307)/inventory_portfolio?parseTime=true&multiStatements=true"
+		dsn = "inventory:example_inventory_only@tcp(127.0.0.1:3307)/inventory_portfolio?parseTime=true&multiStatements=true"
+	}
+	if e := validateDemoDSN(dsn); e != nil {
+		log.Fatal(e)
 	}
 	var e error
 	db, e = sql.Open("mysql", dsn)
@@ -153,10 +156,14 @@ func main() {
 	if e = migrateDocuments(); e != nil {
 		log.Fatal(e)
 	}
+	if e = migrateTransactionActions(); e != nil {
+		log.Fatal(e)
+	}
 	if e = migrateParties(); e != nil {
 		log.Fatal(e)
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/config", handler(demoConfig))
 	mux.HandleFunc("/api/overview", handler(overview))
 	mux.HandleFunc("/api/items", handler(items))
 	mux.HandleFunc("/api/brands", handler(lookup("brands")))
@@ -173,11 +180,20 @@ func main() {
 	mux.HandleFunc("/api/movements", handler(movements))
 	mux.HandleFunc("/api/reports", handler(reports))
 	mux.HandleFunc("/api/history", handler(history))
+	mux.HandleFunc("/api/item-ledger", handler(itemLedger))
+	mux.HandleFunc("/api/inventory-insights", handler(getInsights))
+	mux.HandleFunc("/api/inventory-insights/explain", handler(explainInsights))
 	mux.HandleFunc("/api/recalculate", handler(recalculate))
 	mux.HandleFunc("/api/monthly", handler(monthly))
 	mux.HandleFunc("/api/period", handler(period))
 	mux.HandleFunc("/api/documents", handler(documents))
 	mux.HandleFunc("/api/documents/decision", handler(documentDecision))
+	mux.HandleFunc("/api/documents/edit", handler(editDocument))
+	mux.HandleFunc("/api/documents/unpost", handler(unpostDocument))
+	mux.HandleFunc("/api/documents/post", handler(postDocument))
+	mux.HandleFunc("/api/transactions/edit", handler(editLegacyTransaction))
+	mux.HandleFunc("/api/transactions/unpost", handler(unpostLegacyTransaction))
+	mux.HandleFunc("/api/transactions/post", handler(postLegacyTransaction))
 	mux.HandleFunc("/api/top-items", handler(topItems))
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	addr := os.Getenv("LISTEN_ADDR")
@@ -185,7 +201,7 @@ func main() {
 		addr = "127.0.0.1:8080"
 	}
 	log.Printf("Inventory tracker: http://%s", addr)
-	server := http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	server := http.Server{Addr: addr, Handler: demoGuard(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(server.ListenAndServe())
 }
 func migrate() error {
@@ -485,7 +501,11 @@ func receipts(w http.ResponseWriter, r *http.Request) error {
 	if _, e = tx.Exec("UPDATE purchase_orders SET received=?,status=? WHERE id=?", newReceived, map[bool]string{true: "received", false: "open"}[newReceived >= qty], b.OrderID); e != nil {
 		return e
 	}
-	if _, e = tx.Exec("INSERT INTO movements(item_id,kind,quantity,unit_cost,note) VALUES(?,'GR',?,?,?)", item, b.Quantity, cost, fmt.Sprintf("Purchase order #%d", b.OrderID)); e != nil {
+	result, e := tx.Exec("INSERT INTO movements(item_id,kind,quantity,unit_cost,note) VALUES(?,'GR',?,?,?)", item, b.Quantity, cost, fmt.Sprintf("Purchase order #%d", b.OrderID))
+	if e != nil {
+		return e
+	}
+	if e = recordStockEvent(tx, result, int64(item), b.Quantity, stock); e != nil {
 		return e
 	}
 	if e = tx.Commit(); e != nil {
@@ -541,7 +561,11 @@ func stockOut(w http.ResponseWriter, r *http.Request, isSale bool) error {
 			return e
 		}
 	}
-	if _, e = tx.Exec("INSERT INTO movements(item_id,kind,quantity,unit_cost,note,sale_id) VALUES(?,?,?,?,?,?)", b.ItemID, kind, -b.Quantity, cost, b.Note, saleID); e != nil {
+	result, e := tx.Exec("INSERT INTO movements(item_id,kind,quantity,unit_cost,note,sale_id) VALUES(?,?,?,?,?,?)", b.ItemID, kind, -b.Quantity, cost, b.Note, saleID)
+	if e != nil {
+		return e
+	}
+	if e = recordStockEvent(tx, result, int64(b.ItemID), -b.Quantity, stock); e != nil {
 		return e
 	}
 	if e = tx.Commit(); e != nil {
@@ -553,7 +577,7 @@ func stockOut(w http.ResponseWriter, r *http.Request, isSale bool) error {
 func issues(w http.ResponseWriter, r *http.Request) error { return stockOut(w, r, false) }
 func sales(w http.ResponseWriter, r *http.Request) error {
 	if r.Method == "GET" {
-		x, e := rows(`SELECT s.*,i.sku,i.name item,(s.quantity*s.unit_price) revenue,(s.quantity*s.unit_cost) cogs FROM sales s JOIN items i ON i.id=s.item_id ORDER BY s.id DESC LIMIT 100`)
+		x, e := rows(`SELECT s.*,i.sku,i.name item,(s.quantity*s.unit_price) revenue,(s.quantity*s.unit_cost) cogs FROM sales s JOIN items i ON i.id=s.item_id ORDER BY s.id DESC LIMIT 1000`)
 		if e != nil {
 			return e
 		}
@@ -566,7 +590,7 @@ func movements(w http.ResponseWriter, r *http.Request) error {
 	if e := method(r, "GET"); e != nil {
 		return e
 	}
-	x, e := rows(`SELECT m.*,i.sku,i.name item FROM movements m JOIN items i ON i.id=m.item_id ORDER BY m.id DESC LIMIT 100`)
+	x, e := rows(`SELECT m.*,i.sku,i.name item FROM movements m JOIN items i ON i.id=m.item_id ORDER BY m.id DESC LIMIT 1000`)
 	if e != nil {
 		return e
 	}
@@ -577,7 +601,7 @@ func overview(w http.ResponseWriter, r *http.Request) error {
 	if e := method(r, "GET"); e != nil {
 		return e
 	}
-	x, e := rows(`SELECT (SELECT COUNT(*) FROM items) items,(SELECT COUNT(*) FROM items WHERE quantity<=reorder_level) low_stock,(SELECT COALESCE(SUM(quantity*average_cost),0) FROM items) stock_value,(SELECT COUNT(*) FROM purchase_requests WHERE status='pending') pending,(SELECT COALESCE(SUM(quantity*unit_price),0) FROM sales) revenue,(SELECT COALESCE(SUM(quantity*unit_cost),0) FROM sales) cogs`)
+	x, e := rows(`SELECT (SELECT COUNT(*) FROM items) items,(SELECT COUNT(*) FROM items WHERE quantity<=reorder_level) low_stock,(SELECT COALESCE(SUM(quantity*average_cost),0) FROM items) stock_value,(SELECT COUNT(*) FROM purchase_requests WHERE status='pending') pending,(SELECT COALESCE(SUM(quantity*unit_price),0) FROM sales WHERE voided=0) revenue,(SELECT COALESCE(SUM(quantity*unit_cost),0) FROM sales WHERE voided=0) cogs`)
 	if e != nil {
 		return e
 	}
@@ -588,7 +612,7 @@ func reports(w http.ResponseWriter, r *http.Request) error {
 	if e := method(r, "GET"); e != nil {
 		return e
 	}
-	sales, e := rows(`SELECT DATE_FORMAT(created_at,'%Y-%m-%d') day, SUM(quantity*unit_price) revenue,SUM(quantity*unit_cost) cogs FROM sales GROUP BY day ORDER BY day DESC LIMIT 14`)
+	sales, e := rows(`SELECT DATE_FORMAT(created_at,'%Y-%m-%d') day, SUM(quantity*unit_price) revenue,SUM(quantity*unit_cost) cogs FROM sales WHERE voided=0 GROUP BY day ORDER BY day DESC LIMIT 14`)
 	if e != nil {
 		return e
 	}
@@ -670,7 +694,7 @@ func recalculate(w http.ResponseWriter, r *http.Request) error {
 	}
 	total := 0
 	for _, item := range items {
-		mr, e := tx.Query("SELECT id,kind,quantity,unit_cost,sale_id FROM movements WHERE item_id=? AND created_at>=STR_TO_DATE(CONCAT(?,'-01'),'%Y-%m-%d') AND created_at<DATE_ADD(STR_TO_DATE(CONCAT(?,'-01'),'%Y-%m-%d'),INTERVAL 1 MONTH) ORDER BY id FOR UPDATE", item.id, open, open)
+		mr, e := tx.Query("SELECT id,kind,quantity,unit_cost,sale_id FROM movements WHERE item_id=? AND voided=0 AND created_at>=STR_TO_DATE(CONCAT(?,'-01'),'%Y-%m-%d') AND created_at<DATE_ADD(STR_TO_DATE(CONCAT(?,'-01'),'%Y-%m-%d'),INTERVAL 1 MONTH) ORDER BY id FOR UPDATE", item.id, open, open)
 		if e != nil {
 			return e
 		}

@@ -3,10 +3,10 @@ services:
     image: mysql:8.4
     command: --skip-log-bin
     environment:
-      MYSQL_ROOT_PASSWORD: local_root_password
+      MYSQL_ROOT_PASSWORD: example_root_only
       MYSQL_DATABASE: inventory_portfolio
       MYSQL_USER: inventory
-      MYSQL_PASSWORD: local_inventory_password
+      MYSQL_PASSWORD: example_inventory_only
     ports:
       - "127.0.0.1:3307:3306"
     volumes:

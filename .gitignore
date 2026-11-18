@@ -1,4 +1,11 @@
 **/node_modules/
 **/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
 **/data/
 inventory-tracker/inventory-tracker-local.exe
+inventory-tracker/setup-demo.ps1
+inventory-tracker/start-demo.ps1

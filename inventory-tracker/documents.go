@@ -106,7 +106,7 @@ func documents(w http.ResponseWriter, r *http.Request) error {
 		if b.Kind == "PO" && (k != "PR" || status != "approved") {
 			return bad("Select an approved purchase request.")
 		}
-		if b.Kind == "GR" && (k != "PO" || status == "received") {
+		if b.Kind == "GR" && (k != "PO" || status != "open") {
 			return bad("Select an open purchase order.")
 		}
 	}
@@ -203,6 +203,9 @@ func documents(w http.ResponseWriter, r *http.Request) error {
 			if e != nil {
 				return e
 			}
+			if e = recordStockEvent(tx, res, item, line.Quantity, qty); e != nil {
+				return e
+			}
 			legacy, e = res.LastInsertId()
 			if e != nil {
 				return e
@@ -233,6 +236,9 @@ func documents(w http.ResponseWriter, r *http.Request) error {
 			}
 			res, e := tx.Exec("INSERT INTO movements(item_id,kind,quantity,unit_cost,note,sale_id) VALUES(?,?,?,?,?,?)", line.ItemID, b.Kind, -line.Quantity, cost, b.Note, saleID)
 			if e != nil {
+				return e
+			}
+			if e = recordStockEvent(tx, res, line.ItemID, -line.Quantity, qty); e != nil {
 				return e
 			}
 			legacy, e = res.LastInsertId()
@@ -308,11 +314,11 @@ func topItems(w http.ResponseWriter, r *http.Request) error {
 	if e := method(r, "GET"); e != nil {
 		return e
 	}
-	p, e := rows(`SELECT i.name,i.sku,i.unit,SUM(m.quantity) quantity FROM movements m JOIN items i ON i.id=m.item_id WHERE m.kind='GR' GROUP BY i.id,i.name,i.sku,i.unit ORDER BY quantity DESC LIMIT 5`)
+	p, e := rows(`SELECT i.name,i.sku,i.unit,SUM(m.quantity) quantity FROM movements m JOIN items i ON i.id=m.item_id WHERE m.kind='GR' AND m.voided=0 GROUP BY i.id,i.name,i.sku,i.unit ORDER BY quantity DESC LIMIT 5`)
 	if e != nil {
 		return e
 	}
-	s, e := rows(`SELECT i.name,i.sku,i.unit,SUM(s.quantity) quantity FROM sales s JOIN items i ON i.id=s.item_id GROUP BY i.id,i.name,i.sku,i.unit ORDER BY quantity DESC LIMIT 5`)
+	s, e := rows(`SELECT i.name,i.sku,i.unit,SUM(s.quantity) quantity FROM sales s JOIN items i ON i.id=s.item_id WHERE s.voided=0 GROUP BY i.id,i.name,i.sku,i.unit ORDER BY quantity DESC LIMIT 5`)
 	if e != nil {
 		return e
 	}
