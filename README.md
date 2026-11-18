@@ -4,6 +4,3 @@
 - **Inventory & Sales Tracker** — a Go and MySQL inventory app with purchase requests and approvals, multi-line orders, receipts and issues, sales, moving-average COGS, item history, and optional local AI insights with Ollama. See [screenshots, features, and setup](inventory-tracker/README.md).
 
 ![Inventory dashboard](inventory-tracker/docs/screenshots/dashboard.jpg)
-
-These are local portfolio demonstrations without login or user isolation. Do not expose them to the internet or upload sensitive data without further security work.
-
